@@ -7,13 +7,16 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.chat_models import ChatMaritalk
+from langchain_deepseek import ChatDeepSeek
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
+from langgraph.store.memory import InMemoryStore
+from langgraph.checkpoint.memory import MemorySaver
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -122,6 +125,11 @@ vector_store = Chroma(
 )
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# memories...
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+in_memory_store = InMemoryStore()
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # initializing the language model and agents...
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 llm_gpt_4o_mini = ChatOpenAI(
@@ -135,18 +143,25 @@ llm_sabia_3 = ChatMaritalk(
     temperature=0.01
 )
 
+llm_deepseek_v3 = ChatDeepSeek(
+    model = "deepseek-chat",
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    temperature=0.11
+)
+
 # Create prompt template
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful assistant."),
     ("placeholder", "{messages}")
 ])
 
-# Create agents
+# create agents
 agent_summarizer = create_react_agent(
-    model=llm_sabia_3,
+    model=llm_deepseek_v3,
     tools=list(),
     state_modifier=prompt
 )
+
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # defining the pipeline state...
@@ -213,9 +228,6 @@ def should_end(state: PipelineState):
     logger.info(f"Past chapters: {state['past_chapters']}")
     if (len(state["next_chapters"]) == 0 and len(state["past_chapters"]) > 0):
         logger.info("Processing complete.\n FINAL SUMMARY: \n" + "\n".join(state["summary"]))
-        # overwrite the final summary into a file
-        with open("summary.txt", "w") as f:
-            f.write("\n".join(state["summary"]))
         return END
     else:
         return "summarizer"
@@ -264,6 +276,8 @@ def summarize_step(state: PipelineState):
         }
     logger.info(f"TASK :: {task_str}")
     logger.info(f"RESPONSE :: {agent_response['messages'][-1].content}")
+    with open("summary.txt", "a") as f:
+        f.write(f"\n\n{new_summary}\n\n")
     return {
         "next_chapters": remaining_chapters,
         "past_chapters": past_chapter,
@@ -311,7 +325,7 @@ def run_pipeline(query: str, file_paths: List[str]):
     }    
     print("running pipeline...")
     try:
-        app.invoke(initial_state, config={"recursion_limit": 256})
+        app.invoke(initial_state, config={"recursion_limit": 32})
     except Exception as e:
         print(f"Error running pipeline: {str(e)}")
 
@@ -321,14 +335,14 @@ if __name__ == "__main__":
         Please summarize the document content.
     """
     file_paths = [
-        # "/home/dusoudeth/Calibre Library/Joao Ubaldo Ribeiro/Viva o povo brasileiro (249)/Viva o povo brasileiro - Joao Ubaldo Ribeiro.pdf"
+        "/home/dusoudeth/Calibre Library/Joao Ubaldo Ribeiro/Viva o povo brasileiro (249)/Viva o povo brasileiro - Joao Ubaldo Ribeiro.pdf"
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_acordo .docx",
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_DO_PLANO_DE_CONVIÊNCIA_IDEAL.docx",
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_plano_de_convivencia .docx",
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_plano_de_convivencia_modelo.docx",
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_plano_de_parentalidade.docx",
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_Proposta_de_acordo.docx",
-        "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_tese_doutorado.docx",
+        # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/isadora_urel_tese_doutorado.docx",
         # "/home/dusoudeth/Documentos/github/crew-scientific-research/research/context/docx/plano_de_parentalidade_da_isa.docx",
     ]
     run_pipeline(query, file_paths)
