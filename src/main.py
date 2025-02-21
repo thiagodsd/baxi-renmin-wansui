@@ -1,3 +1,4 @@
+import sys
 import os
 import asyncio
 import operator
@@ -66,9 +67,13 @@ def load_file_contents(file_paths: List[str], vector_store: Chroma) -> dict:
             splits = text_splitter.split_documents(documents)
             
             # Add page numbers and source to metadata
-            for i, doc in enumerate(splits):
-                doc.metadata['page_number'] = i
-                doc.metadata['source'] = path
+            for i, split_doc in enumerate(splits):
+                original_page = split_doc.metadata.get('page', None)
+                if original_page is not None:
+                    split_doc.metadata['page_number'] = original_page
+                else:
+                    split_doc.metadata['page_number'] = i
+                split_doc.metadata['source'] = path
             
             all_splits.extend(splits)
             
@@ -102,6 +107,11 @@ class PipelineState(TypedDict):
     active_agent: str
     processing_complete: bool
 
+
+class IsTheSame(BaseModel):
+    is_the_same: bool = Field(description="True if the two strings are very similar, False otherwise")
+
+
 async def plan_step(state: PipelineState):
     """Create development plan"""
     if not state.get("processing_complete"):
@@ -133,7 +143,8 @@ async def plan_step(state: PipelineState):
                 "processing_complete": False
             }
     
-    return {"active_agent": "summarizer", "processing_complete": False}
+    # Preserve existing processing_complete state
+    return {"active_agent": "summarizer"}
 
 def should_end(state: PipelineState):
     if state.get("processing_complete", False) or (len(state["next_chapters"]) == 0 and len(state["past_chapters"]) > 0):
@@ -158,11 +169,11 @@ async def summarize_step(state: PipelineState):
     
     # Create the task string
     task_str = f"""
-    Please summarize the excerpts of text from the book "Viva o povo brasileiro" by João Ubaldo Ribeiro, indexed by {current_chapter[0]} and the following context:
+    Please summarize the excerpts of text from the book "Viva o povo brasileiro" by João Ubaldo Ribeiro, in Portuguese:
+
     {context}
 
-    SUMMARY SO FAR:
-    {' '.join(state['summary'])}
+    Please, your output needs to be only the summary content, don't say anything else.
     """
     
     # Get agent response
@@ -177,6 +188,33 @@ async def summarize_step(state: PipelineState):
     logger.info(f"\nTask: {task_str}")
     logger.info(f"New summary: {new_summary[0]}")
     
+    EVALUATION_PROMPT = """
+    QUESTION: 
+
+    Is the new summary similar or contained in the previous summary?
+
+    SUMMARY SO FAR:
+
+    {old}
+
+    NEW SUMMARY:
+    {new}
+
+    """
+    evaluation_chain = ChatPromptTemplate.from_template(EVALUATION_PROMPT) | llm_gpt_4o_mini.with_structured_output(IsTheSame)
+    evaluation_response = evaluation_chain.invoke({
+        "old" : ' '.join(state["summary"]),
+        "new" : new_summary[0]
+    })
+
+    if evaluation_response.is_the_same:
+        logger.warning("The new summary is very similar to the previous summary.")
+        return {
+            "next_chapters": remaining_chapters,
+            "past_chapters": past_chapter,
+            "active_agent": "planner",
+            "processing_complete": False
+        }
     return {
         "next_chapters": remaining_chapters,
         "past_chapters": past_chapter,
@@ -186,7 +224,10 @@ async def summarize_step(state: PipelineState):
     }
 
 # Initialize vector store
-PERSIST_DIRECTORY = "../db/vector_store"
+PERSIST_DIRECTORY = "/home/dusoudeth/Documentos/github/baxi-renmin-wansui/db/vector_store"
+# remove existing vector store
+if os.path.exists(PERSIST_DIRECTORY):
+    os.system(f"rm -rf {PERSIST_DIRECTORY}")
 embeddings = OpenAIEmbeddings(
     model="text-embedding-ada-002",
     api_key=os.getenv("OPENAI_API_KEY")
@@ -255,7 +296,7 @@ async def run_pipeline(query: str, file_paths: List[str]):
     print("Running pipeline...")
     summaries = []
     try:
-        async for event in app.astream(initial_state, config={"recursion_limit": 100}):
+        async for event in app.astream(initial_state, config={"recursion_limit": 50}):
             if "__end__" not in event:
                 if "summary" in event and event["summary"]:
                     summaries.extend(event["summary"])
